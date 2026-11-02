@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# ABLIT CODE installer: downloads the `ablit-code` CLI for this machine, verifies its checksum, installs it to
+# ~/.ablit-code/bin and adds that directory to PATH.
+#
+#   curl -fsSL https://ablit.app/install | bash
+#   curl -fsSL https://ablit.app/install | bash -s -- --version 2.3.0
+#
+set -euo pipefail
+APP=ablit-code
+DOWNLOAD_BASE=${ABLIT_CODE_DOWNLOAD_BASE:-https://github.com/mconqeuroror/ablit-code-cli/releases}
+
+MUTED='\033[0;2m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+usage() {
+    cat <<EOF
+ABLIT CODE installer
+
+Usage: install [options]
+
+Options:
+    -h, --help              Display this help message
+    -v, --version <version> Install a specific version (e.g. 2.3.0) instead of the latest release
+    -b, --binary <path>     Install from a local binary instead of downloading
+        --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, …)
+
+Examples:
+    curl -fsSL https://ablit.app/install | bash
+    curl -fsSL https://ablit.app/install | bash -s -- --version 2.3.0
+EOF
+}
+
+requested_version=${VERSION:-}
+no_modify_path=false
+binary_path=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help) usage; exit 0 ;;
+        -v|--version)
+            [[ -n "${2:-}" ]] || { echo -e "${RED}Error: --version requires a version argument${NC}"; exit 1; }
+            requested_version="$2"; shift 2 ;;
+        -b|--binary)
+            [[ -n "${2:-}" ]] || { echo -e "${RED}Error: --binary requires a path argument${NC}"; exit 1; }
+            binary_path="$2"; shift 2 ;;
+        --no-modify-path) no_modify_path=true; shift ;;
+        *) echo -e "${MUTED}Warning: unknown option '$1'${NC}" >&2; shift ;;
+    esac
+done
+
+INSTALL_DIR=$HOME/.ablit-code/bin
+mkdir -p "$INSTALL_DIR"
+
+raw_os=$(uname -s)
+case "$raw_os" in
+  Darwin*) os="darwin" ;;
+  Linux*) os="linux" ;;
+  MINGW*|MSYS*|CYGWIN*) os="windows" ;;
+  *) os=$(echo "$raw_os" | tr '[:upper:]' '[:lower:]') ;;
+esac
+installed_binary="$APP"
+[ "$os" = "windows" ] && installed_binary="$APP.exe"
+
+if [ -z "$binary_path" ]; then
+    arch=$(uname -m)
+    [[ "$arch" == "aarch64" || "$arch" == "arm64" ]] && arch="arm64"
+    [[ "$arch" == "x86_64" || "$arch" == "amd64" ]] && arch="x64"
+
+    # A shell under Rosetta reports x86_64 on Apple Silicon; the native build is the right one.
+    if [ "$os" = "darwin" ] && [ "$arch" = "x64" ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = "1" ]; then
+      arch="arm64"
+    fi
+
+    case "$os-$arch" in
+      linux-x64|linux-arm64|darwin-x64|darwin-arm64|windows-x64) ;;
+      *) echo -e "${RED}Unsupported OS/architecture: $os/$arch${NC}"; echo -e "${MUTED}Builds: Linux x64/arm64, macOS Apple Silicon/Intel, Windows x64. https://ablit.app/cli${NC}"; exit 1 ;;
+    esac
+
+    if [ "$os" = "linux" ] && { [ -f /etc/alpine-release ] || (command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl); }; then
+      echo -e "${RED}Alpine / musl Linux is not supported by this build yet.${NC}"
+      echo -e "${MUTED}Use a glibc-based distribution or a container image such as debian:bookworm-slim.${NC}"
+      exit 1
+    fi
+
+    # x64 CPUs without AVX2 need the baseline build (Linux and Windows; every Intel Mac has AVX2).
+    target="$os-$arch"
+    if [ "$arch" = "x64" ] && [ "$os" = "linux" ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then
+      target="$target-baseline"
+    fi
+    if [ "$arch" = "x64" ] && [ "$os" = "windows" ]; then
+      ps='(Add-Type -MemberDefinition "[DllImport(\"kernel32.dll\")] public static extern bool IsProcessorFeaturePresent(int ProcessorFeature);" -Name Kernel32 -Namespace Win32 -PassThru)::IsProcessorFeaturePresent(40)'
+      out=""
+      if command -v powershell.exe >/dev/null 2>&1; then out=$(powershell.exe -NoProfile -NonInteractive -Command "$ps" 2>/dev/null || true); fi
+      out=$(echo "$out" | tr -d '\r' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+      [ "$out" = "true" ] || target="$target-baseline"
+    fi
+
+    if [ "$os" = "windows" ]; then
+      asset="$APP-$target.zip"; command -v unzip >/dev/null 2>&1 || { echo -e "${RED}Error: 'unzip' is required.${NC}"; exit 1; }
+    else
+      asset="$APP-$target.tar.gz"; command -v tar >/dev/null 2>&1 || { echo -e "${RED}Error: 'tar' is required.${NC}"; exit 1; }
+    fi
+    command -v curl >/dev/null 2>&1 || { echo -e "${RED}Error: 'curl' is required.${NC}"; exit 1; }
+
+    if [ -n "$requested_version" ]; then
+        specific_version="${requested_version#v}"
+        release_url="$DOWNLOAD_BASE/download/v$specific_version"
+    else
+        specific_version="latest"
+        release_url="$DOWNLOAD_BASE/latest/download"
+    fi
+    url="$release_url/$asset"
+fi
+
+print_message() { echo -e "${2}"; }
+
+check_version() {
+    if command -v "$APP" >/dev/null 2>&1; then
+        installed_version=$("$APP" --version 2>/dev/null || echo "")
+        installed_version="${installed_version##* }"
+        print_message info "${MUTED}Installed version: ${NC}${installed_version#v}"
+    fi
+}
+
+verify_checksum() {
+    local file="$1" sums="$2" name
+    name=$(basename "$file")
+    local expected
+    expected=$(grep -E "  ${name}\$" "$sums" | awk '{print $1}' | head -n1)
+    if [ -z "$expected" ]; then
+        print_message warning "${MUTED}No checksum published for $name; skipping verification.${NC}"
+        return 0
+    fi
+    local actual=""
+    if command -v sha256sum >/dev/null 2>&1; then actual=$(sha256sum "$file" | awk '{print $1}')
+    elif command -v shasum >/dev/null 2>&1; then actual=$(shasum -a 256 "$file" | awk '{print $1}')
+    else print_message warning "${MUTED}No sha256 tool found; skipping verification.${NC}"; return 0; fi
+    if [ "$actual" != "$expected" ]; then
+        echo -e "${RED}Checksum mismatch for $name${NC}"
+        echo -e "${MUTED}expected $expected${NC}"
+        echo -e "${MUTED}got      $actual${NC}"
+        exit 1
+    fi
+    print_message info "${MUTED}Checksum verified.${NC}"
+}
+
+download_and_install() {
+    print_message info "\n${MUTED}Installing ${NC}$APP ${MUTED}($specific_version, $target)${NC}"
+    # Not `local`: the EXIT trap runs after this function returns.
+    tmp_dir="${TMPDIR:-/tmp}/ablit_code_install_$$"
+    mkdir -p "$tmp_dir"
+    trap 'rm -rf "${tmp_dir:-}"' EXIT
+
+    local ret=0
+    curl -f -# -L -o "$tmp_dir/$asset" "$url" || ret=$?
+    if [ "$ret" -ne 0 ]; then
+        echo -e "${RED}Download failed ($url)${NC}"
+        [ "$ret" -eq 23 ] && echo -e "${MUTED}Could not write to $tmp_dir; free some space or set TMPDIR.${NC}"
+        [ "$ret" -eq 22 ] && echo -e "${MUTED}That version or build is not published. Releases: $DOWNLOAD_BASE${NC}"
+        exit "$ret"
+    fi
+    curl -fsSL -o "$tmp_dir/SHA256SUMS" "$release_url/SHA256SUMS" || : > "$tmp_dir/SHA256SUMS"
+    verify_checksum "$tmp_dir/$asset" "$tmp_dir/SHA256SUMS"
+
+    if [ "$os" = "windows" ]; then
+        unzip -oq "$tmp_dir/$asset" -d "$tmp_dir"
+    else
+        tar -xzf "$tmp_dir/$asset" -C "$tmp_dir"
+    fi
+    mv -f "$tmp_dir/$installed_binary" "$INSTALL_DIR/$installed_binary"
+    chmod 755 "$INSTALL_DIR/$installed_binary"
+    # A fresh download is quarantined on macOS; the binary is signed, so clearing the flag is all it needs.
+    if [ "$os" = "darwin" ] && command -v xattr >/dev/null 2>&1; then xattr -d com.apple.quarantine "$INSTALL_DIR/$installed_binary" 2>/dev/null || true; fi
+}
+
+install_from_binary() {
+    [ -f "$binary_path" ] || { echo -e "${RED}Error: binary not found at ${binary_path}${NC}"; exit 1; }
+    print_message info "\n${MUTED}Installing ${NC}$APP ${MUTED}from: ${NC}$binary_path"
+    cp "$binary_path" "$INSTALL_DIR/$installed_binary"
+    chmod 755 "$INSTALL_DIR/$installed_binary"
+}
+
+if [ -n "$binary_path" ]; then install_from_binary; else check_version; download_and_install; fi
+
+path_added=false
+add_to_path() {
+    local config_file=$1 command=$2
+    if grep -Fxq "$command" "$config_file" 2>/dev/null; then
+        print_message info "${MUTED}PATH entry already in $config_file${NC}"
+    elif [[ -w $config_file ]]; then
+        printf '\n# ablit-code\n%s\n' "$command" >> "$config_file"
+        path_added=true
+        print_message info "${MUTED}Added ${NC}$APP ${MUTED}to PATH in ${NC}$config_file"
+    else
+        print_message warning "Add this to $config_file (or similar) yourself:"
+        print_message info "  $command"
+    fi
+}
+
+XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
+current_shell=$(basename "${SHELL:-sh}")
+case $current_shell in
+    fish) config_files="$HOME/.config/fish/config.fish" ;;
+    zsh) config_files="${ZDOTDIR:-$HOME}/.zshrc ${ZDOTDIR:-$HOME}/.zshenv $XDG_CONFIG_HOME/zsh/.zshrc $XDG_CONFIG_HOME/zsh/.zshenv" ;;
+    bash) config_files="$HOME/.bashrc $HOME/.bash_profile $HOME/.profile $XDG_CONFIG_HOME/bash/.bashrc $XDG_CONFIG_HOME/bash/.bash_profile" ;;
+    ash|sh) config_files="$HOME/.ashrc $HOME/.profile /etc/profile" ;;
+    *) config_files="$HOME/.bashrc $HOME/.bash_profile $XDG_CONFIG_HOME/bash/.bashrc $XDG_CONFIG_HOME/bash/.bash_profile" ;;
+esac
+
+if [[ "$no_modify_path" != "true" ]]; then
+    config_file=""
+    for file in $config_files; do [[ -f $file ]] && { config_file=$file; break; }; done
+    # A new Mac has no ~/.zshrc; create the shell's main config rather than leaving the command off PATH.
+    if [[ -z $config_file ]]; then
+        case $current_shell in
+            zsh) new_config_file="${ZDOTDIR:-$HOME}/.zshrc" ;;
+            fish) new_config_file="$HOME/.config/fish/config.fish" ;;
+            *) new_config_file="" ;;
+        esac
+        if [[ -n $new_config_file ]] && mkdir -p "$(dirname "$new_config_file")" 2>/dev/null && touch "$new_config_file" 2>/dev/null; then
+            config_file=$new_config_file
+        fi
+    fi
+    if [[ -z $config_file ]]; then
+        print_message warning "No config file found for $current_shell. Add to PATH yourself:"
+        print_message info "  export PATH=$INSTALL_DIR:\$PATH"
+    elif [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+        case $current_shell in
+            fish) add_to_path "$config_file" "fish_add_path $INSTALL_DIR" ;;
+            *) add_to_path "$config_file" "export PATH=$INSTALL_DIR:\$PATH" ;;
+        esac
+    fi
+fi
+
+if [ "${GITHUB_ACTIONS-}" = "true" ] && [ -n "${GITHUB_PATH-}" ]; then
+    echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+fi
+
+echo -e ""
+echo -e "  ${NC}█▀█ █▀▄ █   █ ▀█▀   █▀▀ █▀█ █▀▄ █▀▀${NC}"
+echo -e "  ${NC}█▀█ █▀▄ █   █  █    █   █ █ █ █ █▀▀${NC}"
+echo -e "  ${NC}▀ ▀ ▀▀  ▀▀▀ ▀  ▀    ▀▀▀ ▀▀▀ ▀▀  ▀▀▀${NC}"
+echo -e ""
+echo -e "${MUTED}ABLIT CODE is installed. To start:${NC}"
+echo -e ""
+[[ $path_added == "true" ]] && echo -e "exec \$SHELL                    ${MUTED}# reload PATH (or open a new terminal)${NC}"
+echo -e "ablit-code auth login ablit    ${MUTED}# paste your Ablit API key (Settings → API access)${NC}"
+echo -e "cd <project> && ablit-code     ${MUTED}# start coding${NC}"
+echo -e ""
+echo -e "${MUTED}Guide: ${NC}https://ablit.app/cli"
+echo -e ""
