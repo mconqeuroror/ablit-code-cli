@@ -17,7 +17,7 @@ irm https://ablit.app/install.ps1 | iex
 Then connect your Ablit API key (Settings → API access on https://ablit.app):
 
 ```bash
-ablit-code auth login ablit
+ablit auth login ablit
 ```
 
 Guide: https://ablit.app/cli · API docs: https://ablit.app/docs/api

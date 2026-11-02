@@ -181,7 +181,26 @@ install_from_binary() {
     chmod 755 "$INSTALL_DIR/$installed_binary"
 }
 
+# `ablit` is the short command; both names run the same binary.
+install_alias() {
+    ln -sfn "$installed_binary" "$INSTALL_DIR/ablit" 2>/dev/null || cp "$INSTALL_DIR/$installed_binary" "$INSTALL_DIR/ablit"
+}
+
+# Link the commands into a directory that is already on PATH (when it is writable without sudo, as
+# /opt/homebrew/bin is on Apple Silicon), so they work in the current terminal, not only in a new one.
+link_on_path=""
+link_into_path() {
+    local dir
+    for dir in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin" "$HOME/bin"; do
+        [[ ":$PATH:" == *":$dir:"* && -d $dir && -w $dir ]] || continue
+        ln -sfn "$INSTALL_DIR/$installed_binary" "$dir/$APP" 2>/dev/null && ln -sfn "$INSTALL_DIR/$installed_binary" "$dir/ablit" 2>/dev/null && link_on_path=$dir
+        break
+    done
+}
+
 if [ -n "$binary_path" ]; then install_from_binary; else check_version; download_and_install; fi
+install_alias
+[ "$os" != "windows" ] && link_into_path
 
 path_added=false
 add_to_path() {
@@ -237,16 +256,21 @@ if [ "${GITHUB_ACTIONS-}" = "true" ] && [ -n "${GITHUB_PATH-}" ]; then
     echo "$INSTALL_DIR" >> "$GITHUB_PATH"
 fi
 
+BOLD='\033[1m'
 echo -e ""
-echo -e "  ${NC}█▀█ █▀▄ █   █ ▀█▀   █▀▀ █▀█ █▀▄ █▀▀${NC}"
-echo -e "  ${NC}█▀█ █▀▄ █   █  █    █   █ █ █ █ █▀▀${NC}"
-echo -e "  ${NC}▀ ▀ ▀▀  ▀▀▀ ▀  ▀    ▀▀▀ ▀▀▀ ▀▀  ▀▀▀${NC}"
+echo -e "  ${RED}${BOLD}█▀█ █▀▄ █   █ ▀█▀${NC}   ${BOLD}█▀▀ █▀█ █▀▄ █▀▀${NC}"
+echo -e "  ${RED}${BOLD}█▀█ █▀▄ █   █  █ ${NC}   ${BOLD}█   █ █ █ █ █▀▀${NC}"
+echo -e "  ${RED}${BOLD}▀ ▀ ▀▀  ▀▀▀ ▀  ▀ ${NC}   ${BOLD}▀▀▀ ▀▀▀ ▀▀  ▀▀▀${NC}"
 echo -e ""
-echo -e "${MUTED}ABLIT CODE is installed. To start:${NC}"
+echo -e "${MUTED}ABLIT CODE is installed as ${NC}ablit${MUTED} (and ${NC}ablit-code${MUTED}).${NC}"
 echo -e ""
-[[ $path_added == "true" ]] && echo -e "exec \$SHELL                    ${MUTED}# reload PATH (or open a new terminal)${NC}"
-echo -e "ablit-code auth login ablit    ${MUTED}# paste your Ablit API key (Settings → API access)${NC}"
-echo -e "cd <project> && ablit-code     ${MUTED}# start coding${NC}"
+if [[ -z $link_on_path && ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    echo -e "${BOLD}First, in this terminal, run:${NC}  export PATH=$INSTALL_DIR:\$PATH"
+    echo -e "${MUTED}(new terminals already have it)${NC}"
+    echo -e ""
+fi
+echo -e "ablit auth login ablit    ${MUTED}# paste your Ablit API key (Settings → API access)${NC}"
+echo -e "cd <project> && ablit     ${MUTED}# start coding${NC}"
 echo -e ""
 echo -e "${MUTED}Guide: ${NC}https://ablit.app/cli"
 echo -e ""

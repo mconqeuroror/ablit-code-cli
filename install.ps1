@@ -45,6 +45,8 @@ try {
   $exe = Join-Path $installDir "$App.exe"
   Move-Item -Force (Join-Path $tmp "$App.exe") $exe
   Unblock-File $exe -ErrorAction SilentlyContinue
+  # `ablit` is the short command; the shim forwards to the same executable.
+  Set-Content -Path (Join-Path $installDir "ablit.cmd") -Value "@`"%~dp0ablit-code.exe`" %*" -Encoding ASCII
 } finally {
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
@@ -57,9 +59,9 @@ if (($userPath -split ";") -notcontains $installDir) {
 }
 
 Write-Host ""
-Write-Host "ABLIT CODE is installed. To start (open a new terminal first if the command is not found):"
+Write-Host "ABLIT CODE is installed as 'ablit' (and 'ablit-code'). To start (open a new terminal first if the command is not found):"
 Write-Host ""
-Write-Host "  ablit-code auth login ablit     # paste your Ablit API key (Settings -> API access)"
-Write-Host "  cd <project>; ablit-code        # start coding"
+Write-Host "  ablit auth login ablit     # paste your Ablit API key (Settings -> API access)"
+Write-Host "  cd <project>; ablit        # start coding"
 Write-Host ""
 Write-Host "Guide: https://ablit.app/cli"
